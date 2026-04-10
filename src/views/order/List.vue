@@ -29,6 +29,7 @@
         <el-option label="已发货" value="shipped" />
         <el-option label="已完成" value="completed" />
         <el-option label="已取消" value="cancelled" />
+        <el-option label="退款中" value="refunding" />
       </el-select>
       <el-date-picker
         v-model="searchForm.dateRange"
@@ -43,6 +44,7 @@
       />
       <el-button type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
       <el-button :icon="Refresh" @click="resetSearch">重置</el-button>
+      <el-button type="success" :icon="Download" @click="handleExport">导出CSV</el-button>
     </div>
 
     <!-- 状态统计 -->
@@ -89,7 +91,7 @@
           </template>
         </el-table-column>
         <el-table-column prop="createTime" label="下单时间" width="170" />
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
             <div class="table-actions">
               <el-button type="primary" link @click="viewDetail(row)">详情</el-button>
@@ -108,6 +110,30 @@
                 @click="handleCancel(row)"
               >
                 取消
+              </el-button>
+              <el-button
+                v-if="row.status === 'paid' || row.status === 'shipped'"
+                type="warning"
+                link
+                @click="handleRefund(row)"
+              >
+                退款
+              </el-button>
+              <el-button
+                v-if="row.status === 'refunding'"
+                type="success"
+                link
+                @click="handleRefundApprove(row)"
+              >
+                同意
+              </el-button>
+              <el-button
+                v-if="row.status === 'refunding'"
+                type="danger"
+                link
+                @click="handleRefundReject(row)"
+              >
+                拒绝
               </el-button>
             </div>
           </template>
@@ -192,6 +218,56 @@
           <h4 class="section-title">订单备注</h4>
           <div class="remark-content">{{ currentOrder.remark }}</div>
         </div>
+
+        <!-- 退款信息 -->
+        <div v-if="currentOrder.refundInfo" class="detail-section">
+          <h4 class="section-title">退款信息</h4>
+          <el-descriptions :column="2" border>
+            <el-descriptions-item label="退款金额">¥{{ currentOrder.refundInfo.amount.toFixed(2) }}</el-descriptions-item>
+            <el-descriptions-item label="退款原因">{{ currentOrder.refundInfo.reason }}</el-descriptions-item>
+            <el-descriptions-item label="申请时间">{{ currentOrder.refundInfo.applyTime }}</el-descriptions-item>
+            <el-descriptions-item label="退款状态">
+              <el-tag v-if="currentOrder.status === 'refunding'" type="warning">退款中</el-tag>
+              <el-tag v-else-if="currentOrder.refundInfo.status === 'approved'" type="success">已同意</el-tag>
+              <el-tag v-else-if="currentOrder.refundInfo.status === 'rejected'" type="danger">已拒绝</el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item v-if="currentOrder.refundInfo.rejectReason" label="拒绝原因" :span="2">
+              {{ currentOrder.refundInfo.rejectReason }}
+            </el-descriptions-item>
+          </el-descriptions>
+        </div>
+
+        <!-- 内部备注 -->
+        <div class="detail-section">
+          <h4 class="section-title">内部备注</h4>
+          <div class="internal-notes">
+            <div v-if="!currentOrder.internalNotes || currentOrder.internalNotes.length === 0" class="no-notes">
+              暂无内部备注
+            </div>
+            <div v-else class="notes-list">
+              <div v-for="note in currentOrder.internalNotes" :key="note.id" class="note-item">
+                <div class="note-header">
+                  <span class="note-author">{{ note.author }}</span>
+                  <span class="note-time">{{ note.createTime }}</span>
+                </div>
+                <div class="note-content">{{ note.content }}</div>
+              </div>
+            </div>
+            <div class="add-note">
+              <el-input
+                v-model="newNoteContent"
+                type="textarea"
+                :rows="3"
+                placeholder="添加内部备注..."
+                maxlength="500"
+                show-word-limit
+              />
+              <el-button type="primary" size="small" @click="handleAddNote" style="margin-top: 10px;">
+                添加备注
+              </el-button>
+            </div>
+          </div>
+        </div>
       </div>
       <template #footer>
         <el-button @click="detailVisible = false">关闭</el-button>
@@ -202,6 +278,93 @@
         >
           确认发货
         </el-button>
+        <el-button
+          v-if="currentOrder?.status === 'refunding'"
+          type="success"
+          @click="handleRefundApprove(currentOrder); detailVisible = false"
+        >
+          同意退款
+        </el-button>
+        <el-button
+          v-if="currentOrder?.status === 'refunding'"
+          type="danger"
+          @click="handleRefundReject(currentOrder); detailVisible = false"
+        >
+          拒绝退款
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 退款申请弹窗 -->
+    <el-dialog
+      v-model="refundVisible"
+      title="申请退款"
+      width="500px"
+      destroy-on-close
+    >
+      <el-form :model="refundForm" :rules="refundRules" ref="refundFormRef" label-width="100px">
+        <el-form-item label="订单号">
+          <span>{{ refundOrder?.orderNo }}</span>
+        </el-form-item>
+        <el-form-item label="订单金额">
+          <span class="amount">¥{{ refundOrder?.totalAmount.toFixed(2) }}</span>
+        </el-form-item>
+        <el-form-item label="退款金额" prop="amount">
+          <el-input-number
+            v-model="refundForm.amount"
+            :min="0.01"
+            :max="refundOrder?.totalAmount"
+            :precision="2"
+            :step="0.01"
+            style="width: 100%"
+          />
+          <div class="form-tip">退款金额范围：¥0.01 - ¥{{ refundOrder?.totalAmount.toFixed(2) }}</div>
+        </el-form-item>
+        <el-form-item label="退款原因" prop="reason">
+          <el-input
+            v-model="refundForm.reason"
+            type="textarea"
+            :rows="3"
+            placeholder="请输入退款原因"
+            maxlength="200"
+            show-word-limit
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="refundVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitRefund">提交退款申请</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 拒绝退款弹窗 -->
+    <el-dialog
+      v-model="rejectVisible"
+      title="拒绝退款"
+      width="500px"
+      destroy-on-close
+    >
+      <el-form :model="rejectForm" :rules="rejectRules" ref="rejectFormRef" label-width="100px">
+        <el-form-item label="订单号">
+          <span>{{ rejectOrder?.orderNo }}</span>
+        </el-form-item>
+        <el-form-item label="退款金额">
+          <span class="amount">¥{{ rejectOrder?.refundInfo?.amount.toFixed(2) }}</span>
+        </el-form-item>
+        <el-form-item label="拒绝原因" prop="reason">
+          <el-input
+            v-model="rejectForm.reason"
+            type="textarea"
+            :rows="4"
+            placeholder="请输入拒绝原因"
+            maxlength="200"
+            show-word-limit
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="rejectVisible = false">取消</el-button>
+        <el-button type="danger" @click="submitReject">确认拒绝</el-button>
       </template>
     </el-dialog>
   </div>
@@ -210,30 +373,60 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh } from '@element-plus/icons-vue'
+import { Search, Refresh, Download, Goods } from '@element-plus/icons-vue'
+import { useUserStore } from '@/stores/user'
+
+const userStore = useUserStore()
 
 const loading = ref(false)
 
-// 搜索表单
 const searchForm = reactive({
   keyword: '',
   status: null,
   dateRange: null
 })
 
-// 分页
 const pagination = reactive({
   page: 1,
   size: 10,
   total: 0
 })
 
-// 表格数据
 const tableData = ref([])
 
-// 详情弹窗
 const detailVisible = ref(false)
 const currentOrder = ref(null)
+
+const refundVisible = ref(false)
+const refundOrder = ref(null)
+const refundFormRef = ref(null)
+const refundForm = reactive({
+  amount: 0,
+  reason: ''
+})
+const refundRules = {
+  amount: [
+    { required: true, message: '请输入退款金额', trigger: 'blur' },
+    { type: 'number', min: 0.01, message: '退款金额不能小于0.01', trigger: 'blur' }
+  ],
+  reason: [
+    { required: true, message: '请选择退款原因', trigger: 'change' }
+  ]
+}
+
+const rejectVisible = ref(false)
+const rejectOrder = ref(null)
+const rejectFormRef = ref(null)
+const rejectForm = reactive({
+  reason: ''
+})
+const rejectRules = {
+  reason: [
+    { required: true, message: '请输入拒绝原因', trigger: 'blur' }
+  ]
+}
+
+const newNoteContent = ref('')
 
 // 状态配置
 const getStatusType = (status) => {
@@ -242,7 +435,8 @@ const getStatusType = (status) => {
     paid: 'primary',
     shipped: 'info',
     completed: 'success',
-    cancelled: 'danger'
+    cancelled: 'danger',
+    refunding: 'warning'
   }
   return types[status] || 'info'
 }
@@ -253,13 +447,14 @@ const getStatusText = (status) => {
     paid: '已付款',
     shipped: '已发货',
     completed: '已完成',
-    cancelled: '已取消'
+    cancelled: '已取消',
+    refunding: '退款中'
   }
   return texts[status] || status
 }
 
 const getActiveStep = (status) => {
-  const steps = { pending: 0, paid: 1, shipped: 2, completed: 3, cancelled: -1 }
+  const steps = { pending: 0, paid: 1, shipped: 2, completed: 3, cancelled: -1, refunding: -1 }
   return steps[status] ?? 0
 }
 
@@ -271,6 +466,7 @@ const statusTabs = computed(() => {
     { label: '待付款', value: 'pending', count: orders.filter(o => o.status === 'pending').length },
     { label: '已付款', value: 'paid', count: orders.filter(o => o.status === 'paid').length },
     { label: '已发货', value: 'shipped', count: orders.filter(o => o.status === 'shipped').length },
+    { label: '退款中', value: 'refunding', count: orders.filter(o => o.status === 'refunding').length },
     { label: '已完成', value: 'completed', count: orders.filter(o => o.status === 'completed').length },
     { label: '已取消', value: 'cancelled', count: orders.filter(o => o.status === 'cancelled').length }
   ]
@@ -398,6 +594,171 @@ const handleCancel = (order) => {
       loadData()
     }
   }).catch(() => {})
+}
+
+const handleRefund = (order) => {
+  refundOrder.value = order
+  refundForm.amount = order.totalAmount
+  refundForm.reason = ''
+  refundVisible.value = true
+}
+
+const submitRefund = () => {
+  refundFormRef.value.validate((valid) => {
+    if (valid) {
+      const orders = initOrders()
+      const index = orders.findIndex(o => o.id === refundOrder.value.id)
+      if (index > -1) {
+        const previousStatus = orders[index].status
+        orders[index].status = 'refunding'
+        orders[index].previousStatus = previousStatus
+        orders[index].refundInfo = {
+          amount: refundForm.amount,
+          reason: refundForm.reason,
+          applyTime: new Date().toLocaleString(),
+          status: 'pending'
+        }
+        localStorage.setItem('mock_orders', JSON.stringify(orders))
+        ElMessage.success('退款申请已提交')
+        refundVisible.value = false
+        loadData()
+      }
+    }
+  })
+}
+
+const handleRefundApprove = (order) => {
+  ElMessageBox.confirm(`确定同意订单「${order.orderNo}」的退款申请吗？`, '同意退款', {
+    confirmButtonText: '确定',
+    cancelButtonText: '取消',
+    type: 'info'
+  }).then(() => {
+    const orders = initOrders()
+    const index = orders.findIndex(o => o.id === order.id)
+    if (index > -1) {
+      orders[index].refundInfo.status = 'approved'
+      orders[index].status = 'cancelled'
+      localStorage.setItem('mock_orders', JSON.stringify(orders))
+      ElMessage.success('退款已同意')
+      loadData()
+    }
+  }).catch(() => {})
+}
+
+const handleRefundReject = (order) => {
+  rejectOrder.value = order
+  rejectForm.reason = ''
+  rejectVisible.value = true
+}
+
+const submitReject = () => {
+  rejectFormRef.value.validate((valid) => {
+    if (valid) {
+      const orders = initOrders()
+      const index = orders.findIndex(o => o.id === rejectOrder.value.id)
+      if (index > -1) {
+        orders[index].refundInfo.status = 'rejected'
+        orders[index].refundInfo.rejectReason = rejectForm.reason
+        orders[index].status = orders[index].previousStatus || 'paid'
+        localStorage.setItem('mock_orders', JSON.stringify(orders))
+        ElMessage.success('退款已拒绝，订单已恢复原状态')
+        rejectVisible.value = false
+        loadData()
+      }
+    }
+  })
+}
+
+const handleAddNote = () => {
+  if (!newNoteContent.value.trim()) {
+    ElMessage.warning('请输入备注内容')
+    return
+  }
+
+  const orders = initOrders()
+  const index = orders.findIndex(o => o.id === currentOrder.value.id)
+  if (index > -1) {
+    if (!orders[index].internalNotes) {
+      orders[index].internalNotes = []
+    }
+    orders[index].internalNotes.push({
+      id: Date.now(),
+      content: newNoteContent.value,
+      author: userStore.userInfo?.nickname || userStore.userInfo?.username || '未知用户',
+      createTime: new Date().toLocaleString()
+    })
+    localStorage.setItem('mock_orders', JSON.stringify(orders))
+    currentOrder.value = orders[index]
+    newNoteContent.value = ''
+    ElMessage.success('备注添加成功')
+    loadData()
+  }
+}
+
+const handleExport = () => {
+  let orders = initOrders()
+
+  if (searchForm.keyword) {
+    const keyword = searchForm.keyword.toLowerCase()
+    orders = orders.filter(o =>
+      o.orderNo.toLowerCase().includes(keyword) ||
+      o.receiver.toLowerCase().includes(keyword)
+    )
+  }
+  if (searchForm.status) {
+    orders = orders.filter(o => o.status === searchForm.status)
+  }
+  if (searchForm.dateRange && searchForm.dateRange.length === 2) {
+    const [start, end] = searchForm.dateRange
+    orders = orders.filter(o => {
+      const date = o.createTime.split(' ')[0]
+      return date >= start && date <= end
+    })
+  }
+
+  orders.sort((a, b) => new Date(b.createTime) - new Date(a.createTime))
+
+  const statusMap = {
+    pending: '待付款',
+    paid: '已付款',
+    shipped: '已发货',
+    completed: '已完成',
+    cancelled: '已取消',
+    refunding: '退款中'
+  }
+
+  const headers = ['订单号', '商品名称', '单价', '数量', '订单金额', '收货人', '联系电话', '收货地址', '订单状态', '下单时间', '支付时间', '发货时间', '完成时间']
+  const csvContent = [
+    headers.join(','),
+    ...orders.map(o => [
+      o.orderNo,
+      `"${o.productName}"`,
+      o.price,
+      o.quantity,
+      o.totalAmount.toFixed(2),
+      `"${o.receiver}"`,
+      o.phone,
+      `"${o.address}"`,
+      `"${statusMap[o.status] || o.status}"`,
+      `"${o.createTime}"`,
+      `"${o.payTime || ''}"`,
+      `"${o.shipTime || ''}"`,
+      `"${o.completeTime || ''}"`
+    ].join(','))
+  ].join('\n')
+
+  const BOM = '\uFEFF'
+  const blob = new Blob([BOM + csvContent], { type: 'text/csv;charset=utf-8;' })
+  const link = document.createElement('a')
+  const url = URL.createObjectURL(blob)
+  link.setAttribute('href', url)
+  link.setAttribute('download', `订单列表_${new Date().toLocaleDateString()}.csv`)
+  link.style.visibility = 'hidden'
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+
+  ElMessage.success(`成功导出 ${orders.length} 条订单`)
 }
 
 
@@ -566,6 +927,65 @@ onMounted(() => {
     color: #92400e;
     font-size: 14px;
   }
+
+  .internal-notes {
+    .no-notes {
+      text-align: center;
+      color: #9ca3af;
+      padding: 20px;
+      background: #f8fafc;
+      border-radius: 8px;
+    }
+
+    .notes-list {
+      margin-bottom: 16px;
+
+      .note-item {
+        padding: 12px;
+        background: #f8fafc;
+        border-radius: 8px;
+        margin-bottom: 8px;
+        border-left: 3px solid #667eea;
+
+        &:last-child {
+          margin-bottom: 0;
+        }
+
+        .note-header {
+          display: flex;
+          justify-content: space-between;
+          margin-bottom: 8px;
+          font-size: 13px;
+
+          .note-author {
+            color: #667eea;
+            font-weight: 500;
+          }
+
+          .note-time {
+            color: #9ca3af;
+          }
+        }
+
+        .note-content {
+          color: #1f2937;
+          font-size: 14px;
+          line-height: 1.6;
+        }
+      }
+    }
+
+    .add-note {
+      padding-top: 12px;
+      border-top: 1px dashed #e5e7eb;
+    }
+  }
+}
+
+.form-tip {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 4px;
 }
 
 :deep(.el-steps) {
